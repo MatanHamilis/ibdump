@@ -206,37 +206,37 @@ static int poll_completion(struct resources *res, FILE* f,
     hdr->erf.rlen  = ntohs(len + sizeof(hdr->erf)); // TODO - extra 6 bytes here ???
     hdr->erf.type  = config.erf_type;
 
-    if (config.mem_size) {
-        if (!config.writer_thread) {
-            memcpy(res->mem_buf + res->dumped_bytes, hdr, header_size);
-            memcpy(res->mem_buf + res->dumped_bytes + header_size, res->buf[idx] + decap_offs, len);
-        } else {
-            if((res->dumped_bytes + header_size + len) >= config.mem_size){
-                res->buf_length[res->network_current_buf] = res->dumped_bytes;
-                res->dumped_bytes = 0;
-                res->thread_status[res->network_current_buf] = 1;
-                res->network_current_buf = (res->network_current_buf + 1) % 2;
-                while(res->thread_status[res->network_current_buf] == 1)
-                    ;
-            }
-            memcpy(res->thread_buf[res->network_current_buf] + res->dumped_bytes, hdr, header_size);
-            memcpy(res->thread_buf[res->network_current_buf] + res->dumped_bytes + header_size, res->buf[idx] + decap_offs, len);
-        }
-    } else {
-
-        rc = fwrite(hdr, header_size , 1, f);
-        if (rc == 1) {
-            rc = fwrite(res->buf[idx] + decap_offs, len , 1, f);
-        }
-
-        if (rc != 1) {
-            fprintf(stderr, "-E- Failed writing to file: %s\n", strerror(errno));
-            return 1;
-        }
-        if (config.to_stdout) {
-            fflush(f);
-        }
-    }
+//    if (config.mem_size) {
+//        if (!config.writer_thread) {
+//            memcpy(res->mem_buf + res->dumped_bytes, hdr, header_size);
+//            memcpy(res->mem_buf + res->dumped_bytes + header_size, res->buf[idx] + decap_offs, len);
+//        } else {
+//            if((res->dumped_bytes + header_size + len) >= config.mem_size){
+//                res->buf_length[res->network_current_buf] = res->dumped_bytes;
+//                res->dumped_bytes = 0;
+//                res->thread_status[res->network_current_buf] = 1;
+//                res->network_current_buf = (res->network_current_buf + 1) % 2;
+//                while(res->thread_status[res->network_current_buf] == 1)
+//                    ;
+//            }
+//            memcpy(res->thread_buf[res->network_current_buf] + res->dumped_bytes, hdr, header_size);
+//            memcpy(res->thread_buf[res->network_current_buf] + res->dumped_bytes + header_size, res->buf[idx] + decap_offs, len);
+//        }
+//    } else {
+//
+//        rc = fwrite(hdr, header_size , 1, f);
+//        if (rc == 1) {
+//            rc = fwrite(res->buf[idx] + decap_offs, len , 1, f);
+//        }
+//
+//        if (rc != 1) {
+//            fprintf(stderr, "-E- Failed writing to file: %s\n", strerror(errno));
+//            return 1;
+//        }
+//        if (config.to_stdout) {
+//            fflush(f);
+//        }
+//    }
 
     res->dumped_bytes += (header_size + len);
 
