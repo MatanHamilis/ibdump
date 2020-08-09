@@ -71,7 +71,11 @@
 #endif
 
 
+#define ARRAY_SZ (100)
 int g_stop_sniffer = 0;
+struct ibv_wc wc[ARRAY_SZ];
+struct ibv_recv_wr rr[ARRAY_SZ];
+struct ibv_sge sge[ARRAY_SZ];
 
 void my_printf( const char* format, ... ) {
     va_list args;
@@ -108,7 +112,8 @@ static u_int32_t mtu_enum_to_num(int mtu_e) {
 static int poll_completion(struct resources *res, FILE* f,
                            int idx, int* added_packets)
 {
-    struct ibv_wc wc;
+    int orig_idx = idx;
+    //struct ibv_wc wc[4096];
     struct timeval cur_time;
     int rc;
     rec_hdr_t hdr_obj;
@@ -120,6 +125,7 @@ static int poll_completion(struct resources *res, FILE* f,
     int                  decap_offs = 0;
     u_int32_t len;
     u_int32_t header_size;
+    *added_packets = 0;
 
     if (!config.is_silent &&
         prev_cap_time_sec > prev_print_time_sec &&
@@ -141,7 +147,7 @@ static int poll_completion(struct resources *res, FILE* f,
 
     do {
         --poll_count;
-        rc = ibv_poll_cq(res->cq, 1, &wc); // TODO: Multiple WC poll
+        rc = ibv_poll_cq(res->cq, ARRAY_SZ, &wc); // TODO: Multiple WC poll
         if (rc < 0) {
             fprintf(stderr, "-E- poll CQ failed\n");
             return 1;
@@ -158,123 +164,131 @@ static int poll_completion(struct resources *res, FILE* f,
 
     // fprintf(stdout, "completion was found in CQ with status 0x%x, bytes: %d\n", wc.status, wc.byte_len);
 
-    /* check the completion status (here we don't care about the completion opcode */
-    if (wc.status != IBV_WC_SUCCESS) {
-        fprintf(stderr, "\n-E- got bad completion with status: 0x%x, vendor syndrome: 0x%x\n",
-                wc.status, wc.vendor_err);
-        //getchar();
-        return 1;
-    }
+    for (int wc_idx = 0 ; wc_idx < rc ; ++wc_idx)
+    {
+	    /* check the completion status (here we don't care about the completion opcode */
+	    if (wc[wc_idx].status != IBV_WC_SUCCESS) {
+		fprintf(stderr, "\n-E- got bad completion with status: 0x%x, vendor syndrome: 0x%x\n",
+			wc[wc_idx].status, wc[wc_idx].vendor_err);
+		//getchar();
+		return 1;
+	    }
 
-    len = wc.byte_len;
+	    len = wc[wc_idx].byte_len;
 
-    hdr->erf.flags = 4;
+	    hdr->erf.flags = 4;
 
-    if (config.decap_mode) {
-        // Decap - remove LRH, RWH, and CRC
-        if (((res->buf[idx][2] & 0x3) == 0 ) &&  // LRH->LNH Says RAW
-             (res->buf[idx][10] == (PM_ENCAP_ETHERTYPE >> 8)) &&
-             (res->buf[idx][11] == (PM_ENCAP_ETHERTYPE  & 0xff))) { // RWH->EtherType matches port mirroring encap
+	    if (config.decap_mode) {
+		// Decap - remove LRH, RWH, and CRC
+		if (((res->buf[(idx + wc_idx) % config.entries_num][2] & 0x3) == 0 ) &&  // LRH->LNH Says RAW
+		     (res->buf[(idx + wc_idx) % config.entries_num][10] == (PM_ENCAP_ETHERTYPE >> 8)) &&
+		     (res->buf[(idx + wc_idx) % config.entries_num][11] == (PM_ENCAP_ETHERTYPE  & 0xff))) { // RWH->EtherType matches port mirroring encap
 
-            decap_offs = 16;
-            len -= 18; // remove LRW, RWH, Mirror_Prefix and VCRC
-            hdr->erf.flags = 5;
-        }
-    }
+		    decap_offs = 16;
+		    len -= 18; // remove LRW, RWH, Mirror_Prefix and VCRC
+		    hdr->erf.flags = 5;
+		}
+	    }
 
-    /* pcap header */
-    hdr->pcap.ts_sec   = cur_time.tv_sec;
-    hdr->pcap.ts_usec  = cur_time.tv_usec;
-    hdr->pcap.orig_len = len;
-    header_size = sizeof(hdr->pcap);
-    if (config.with_erf) {
-        header_size        += sizeof(hdr->erf);
-        hdr->pcap.orig_len += sizeof(hdr->erf);
-    }
+	    /* pcap header */
+	    hdr->pcap.ts_sec   = cur_time.tv_sec;
+	    hdr->pcap.ts_usec  = cur_time.tv_usec;
+	    hdr->pcap.orig_len = len;
+	    header_size = sizeof(hdr->pcap);
+	    if (config.with_erf) {
+		header_size        += sizeof(hdr->erf);
+		hdr->pcap.orig_len += sizeof(hdr->erf);
+	    }
 
-    /* Currently no truncating is done */
-    hdr->pcap.incl_len = hdr->pcap.orig_len;
+	    /* Currently no truncating is done */
+	    hdr->pcap.incl_len = hdr->pcap.orig_len;
 
-    /* erf header */
-    hdr->erf.ts    =  ((u_int64_t)cur_time.tv_sec) << 32;
-    // 1<<32 / 10E6 = 4294.967296
-    // The below is an approximation which is 99.999% accurate.
-    // TODO - See if tehre's a better way to do that (performance wise)
-    hdr->erf.ts   += (u_int64_t)cur_time.tv_usec * 4295;
-    hdr->erf.lctr  = 0;
-    hdr->erf.wlen  = ntohs((u_int16_t)len);
-    hdr->erf.rlen  = ntohs(len + sizeof(hdr->erf)); // TODO - extra 6 bytes here ???
-    hdr->erf.type  = config.erf_type;
+	    /* erf header */
+	    hdr->erf.ts    =  ((u_int64_t)cur_time.tv_sec) << 32;
+	    // 1<<32 / 10E6 = 4294.967296
+	    // The below is an approximation which is 99.999% accurate.
+	    // TODO - See if tehre's a better way to do that (performance wise)
+	    hdr->erf.ts   += (u_int64_t)cur_time.tv_usec * 4295;
+	    hdr->erf.lctr  = 0;
+	    hdr->erf.wlen  = ntohs((u_int16_t)len);
+	    hdr->erf.rlen  = ntohs(len + sizeof(hdr->erf)); // TODO - extra 6 bytes here ???
+	    hdr->erf.type  = config.erf_type;
 
-//    if (config.mem_size) {
-//        if (!config.writer_thread) {
-//            memcpy(res->mem_buf + res->dumped_bytes, hdr, header_size);
-//            memcpy(res->mem_buf + res->dumped_bytes + header_size, res->buf[idx] + decap_offs, len);
-//        } else {
-//            if((res->dumped_bytes + header_size + len) >= config.mem_size){
-//                res->buf_length[res->network_current_buf] = res->dumped_bytes;
-//                res->dumped_bytes = 0;
-//                res->thread_status[res->network_current_buf] = 1;
-//                res->network_current_buf = (res->network_current_buf + 1) % 2;
-//                while(res->thread_status[res->network_current_buf] == 1)
-//                    ;
-//            }
-//            memcpy(res->thread_buf[res->network_current_buf] + res->dumped_bytes, hdr, header_size);
-//            memcpy(res->thread_buf[res->network_current_buf] + res->dumped_bytes + header_size, res->buf[idx] + decap_offs, len);
-//        }
-//    } else {
-//
-//        rc = fwrite(hdr, header_size , 1, f);
-//        if (rc == 1) {
-//            rc = fwrite(res->buf[idx] + decap_offs, len , 1, f);
-//        }
-//
-//        if (rc != 1) {
-//            fprintf(stderr, "-E- Failed writing to file: %s\n", strerror(errno));
-//            return 1;
-//        }
-//        if (config.to_stdout) {
-//            fflush(f);
-//        }
-//    }
+	//    if (config.mem_size) {
+	//        if (!config.writer_thread) {
+	//            memcpy(res->mem_buf + res->dumped_bytes, hdr, header_size);
+	//            memcpy(res->mem_buf + res->dumped_bytes + header_size, res->buf[idx] + decap_offs, len);
+	//        } else {
+	//            if((res->dumped_bytes + header_size + len) >= config.mem_size){
+	//                res->buf_length[res->network_current_buf] = res->dumped_bytes;
+	//                res->dumped_bytes = 0;
+	//                res->thread_status[res->network_current_buf] = 1;
+	//                res->network_current_buf = (res->network_current_buf + 1) % 2;
+	//                while(res->thread_status[res->network_current_buf] == 1)
+	//                    ;
+	//            }
+	//            memcpy(res->thread_buf[res->network_current_buf] + res->dumped_bytes, hdr, header_size);
+	////            memcpy(res->thread_buf[res->network_current_buf] + res->dumped_bytes + header_size, res->buf[idx] + decap_offs, len);
+	//        }
+	//    } else {
+	//
+	//        rc = fwrite(hdr, header_size , 1, f);
+	//        if (rc == 1) {
+	//            rc = fwrite(res->buf[idx] + decap_offs, len , 1, f);
+	//        }
+	//
+	//        if (rc != 1) {
+	//            fprintf(stderr, "-E- Failed writing to file: %s\n", strerror(errno));
+	//            return 1;
+	//        }
+	//        if (config.to_stdout) {
+	//            fflush(f);
+	//        }
+	//    }
 
-    res->dumped_bytes += (header_size + len);
+	    res->dumped_bytes += (header_size + len);
 
-    *added_packets = 1;
-    res->sniffed_pkts  += 1;
-    res->sniffed_bytes += len;
+	    *added_packets += 1;
+	    res->sniffed_pkts  += 1;
+	    res->sniffed_bytes += len;
 
-
+	}
     return 0;
 }
 
 /*****************************************
 * Function: post_receive
 *****************************************/
-static int post_receive(struct resources *res, int idx)
+static int post_receive(struct resources *res, int idx, int count)
 {
-    struct ibv_recv_wr rr;
-    struct ibv_sge sge;
+    //struct ibv_recv_wr rr[4096];
+    //struct ibv_sge sge[4096];
     struct ibv_recv_wr *bad_wr;
     int rc;
 
     /* prepare the scatter/gather entry
        Reserve room for the pcap+erf headers before the packet data
     */
-    memset(&sge, 0, sizeof(sge));
-    sge.addr   = (uintptr_t)(res->buf[idx]);
-    //sge.length = 4*1024; //orenk mtu_enum_to_num(res->port_attr.active_mtu) + GRH_SIZE;
-    sge.length = res->entry_size;
-    sge.lkey   = res->mr->lkey;
+    //memset(sge, 0, sizeof(sge));
+    for (int i = 0 ; i < count ; ++i)
+    {
+	    sge[i].addr   = (uintptr_t)(res->buf[(idx + i)% config.entries_num]);
+	    //sge.length = 4*1024; //orenk mtu_enum_to_num(res->port_attr.active_mtu) + GRH_SIZE;
+	    sge[i].length = res->entry_size;
+	    sge[i].lkey   = res->mr->lkey;
+   }
 
     /* prepare the RR */
-    memset(&rr, 0, sizeof(rr));
+    //memset(rr, 0, sizeof(rr));
 
-    rr.next    = NULL;
-    rr.wr_id   = 0;
-    rr.sg_list = &sge;
-    rr.num_sge = 1;
-
+    for (int i = 0 ; i < count ; ++i)
+    {
+	    rr[i].next    = rr+(i+1);
+	    rr[i].wr_id   = 0;
+	    rr[i].sg_list = sge+i;
+	    rr[i].num_sge = 1;
+    }
+    rr[count-1].next = NULL;
     /* post the Receive Request to the RQ */
     rc = ibv_post_recv(res->qp, &rr, &bad_wr);
     if (rc) {
@@ -602,7 +616,7 @@ static int resources_create(struct resources *res)
     qp_init_attr.sq_sig_all = 1;
     qp_init_attr.send_cq    = res->cq;
     qp_init_attr.recv_cq    = res->cq;
-    qp_init_attr.cap.max_send_wr  = 1;
+    qp_init_attr.cap.max_send_wr  = 0;
     qp_init_attr.cap.max_recv_wr  = config.entries_num;
     qp_init_attr.cap.max_send_sge = 1;
     qp_init_attr.cap.max_recv_sge = 1;
@@ -696,7 +710,7 @@ static int connect_qp(struct resources *res)
 
     /* let the client post RR to be prepared for incoming messages */
     for (n = 0; n < config.entries_num; n++) {
-        rc = post_receive(res, n);
+        rc = post_receive(res, n, 1);
         if (rc) {
             fprintf(stderr, "-E- failed to post RR\n");
             return rc;
@@ -1434,7 +1448,7 @@ int __WIN_CDECL main(int argc, char *argv[])
             goto cleanup;
         }
         if (!g_stop_sniffer && added_packets > 0) {
-            rc = post_receive(&res, idx);
+            rc = post_receive(&res, idx, added_packets);
             if (rc) {
                 fprintf(stderr, "-E- failed to post RR\n");
                 return rc;
